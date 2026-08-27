@@ -1,0 +1,27 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Midea Cloud Control",
+        "description": "Sign in with the app account your air conditioner is registered to. This is used to relay commands through the vendor cloud, so no device token is required.",
+        "data": {
+          "username": "Email address",
+          "password": "Password",
+          "cloud": "App / cloud"
+        }
+      },
+      "appliance": {
+        "title": "Select appliance",
+        "data": { "appliance_id": "Appliance" }
+      }
+    },
+    "error": {
+      "invalid_auth": "Login failed. Check the email, password, and that the selected app matches the one your appliance is registered in.",
+      "no_appliances": "Login succeeded but no appliances were found on this account.",
+      "unknown": "Unexpected error. Check the Home Assistant logs."
+    },
+    "abort": {
+      "already_configured": "This appliance is already configured."
+    }
+  }
+}
