@@ -104,7 +104,9 @@ class MideaCloudClient:
         command = SetStateCommand()
         command.beep_on = beep
         for field in _CARRIED_STATE:
-            setattr(command, field, getattr(current, field))
+            state_value = getattr(current, field, None)
+            if state_value is not None:
+                setattr(command, field, state_value)
         for field, value in changes.items():
             setattr(command, field, value)
 
