@@ -6,7 +6,9 @@ mapp.appsmb.com API -- Ariston Clima, NetHome Plus and Midea Air.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Any
 
 import aiohttp
@@ -52,9 +54,15 @@ class MideaCloudClient:
         self._session = session
         self._owns_session = session is None
         self._cloud: Any = None
+        self._lock = asyncio.Lock()
+        self._last_reconnect = float('-inf')
 
     async def __aenter__(self) -> MideaCloudClient:
-        await self.connect()
+        try:
+            await self.connect()
+        except BaseException:
+            await self.close()
+            raise
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -63,10 +71,14 @@ class MideaCloudClient:
     async def connect(self) -> None:
         if self._session is None:
             self._session = aiohttp.ClientSession()
-        self._cloud = get_midea_cloud(
-            self._cloud_name, self._session, self._account, self._password)
-        if not await self._cloud.login():
-            raise CloudError(f"login failed for {self._account} on {self._cloud_name}")
+        try:
+            cloud = get_midea_cloud(
+                self._cloud_name, self._session, self._account, self._password)
+            if not await asyncio.wait_for(cloud.login(), 30):
+                raise CloudError("Cloud login failed")
+        except Exception as err:
+            raise CloudError(f"Cloud login failed ({type(err).__name__})") from None
+        self._cloud = cloud
         _LOGGER.debug("Logged in to %s", self._cloud_name)
 
     async def close(self) -> None:
@@ -75,41 +87,81 @@ class MideaCloudClient:
             self._session = None
 
     async def list_appliances(self) -> dict[int, dict[str, Any]]:
-        return await self._cloud.list_appliances(None) or {}
+        async with self._lock:
+            try:
+                return await asyncio.wait_for(self._cloud.list_appliances(None), 25) or {}
+            except Exception as err:
+                raise CloudError(f"Appliance listing failed ({type(err).__name__})") from None
 
-    async def query(self, appliance_id: int) -> StateResponse:
+    async def _query_once(self, appliance_id: int) -> StateResponse:
         """Read current state of the appliance."""
-        reply = await transparent_send(
-            self._cloud, appliance_id, GetStateCommand().tobytes(), self._app_key)
-        if reply is None:
-            raise CloudError(f"no reply from appliance {appliance_id}")
-        response = Response.construct(reply)
+        response = await self._send(appliance_id, GetStateCommand())
         if not isinstance(response, StateResponse):
             raise CloudError(f"unexpected response type {type(response).__name__}")
         return response
 
+    async def _send(self, appliance_id: int, command: Any) -> Response:
+        """Send a single request. Never automatically repeat a write."""
+        try:
+            reply = await asyncio.wait_for(transparent_send(
+                self._cloud, appliance_id, command.tobytes(), self._app_key), 25)
+            if reply is None:
+                raise CloudError("No appliance reply")
+            return Response.construct(reply)
+        except CloudError:
+            raise
+        except Exception as err:
+            raise CloudError(f"Cloud request failed ({type(err).__name__})") from None
+
+    async def _query_locked(self, appliance_id: int) -> StateResponse:
+        try:
+            return await self._query_once(appliance_id)
+        except CloudError:
+            # A missing reply can also indicate an offline appliance. Limit
+            # reconnect attempts and retry only the read, never a write.
+            now = time.monotonic()
+            if now - self._last_reconnect < 120:
+                raise
+            self._last_reconnect = now
+            await self.connect()
+            return await self._query_once(appliance_id)
+
+    async def query(self, appliance_id: int) -> StateResponse:
+        async with self._lock:
+            return await self._query_locked(appliance_id)
+
+    async def _confirm_locked(self, appliance_id: int, expected: dict[str, Any]) -> StateResponse:
+        """Allow the cloud/device state to settle; repeat reads only."""
+        result = None
+        for delay in (1, 2, 3):
+            await asyncio.sleep(delay)
+            result = await self._query_locked(appliance_id)
+            if all(getattr(result, field, None) == value for field, value in expected.items()):
+                return result
+        return result
+
     async def set_state(self, appliance_id: int, *, beep: bool = False,
-                        **changes: Any) -> StateResponse:
-        """Apply `changes` on top of current state, then return the new state.
-
-        Midea set commands carry the *entire* state, so current values are read
-        first and merged -- otherwise setting one field resets the others.
-        """
+                        verify: bool = False, **changes: Any) -> StateResponse:
+        """Serialize read/merge/write; optionally confirm with readback."""
         unknown = set(changes) - set(_CARRIED_STATE)
-        if unknown:
-            raise ValueError(f"unsupported field(s): {sorted(unknown)}")
+        if unknown or any(value is None for value in changes.values()):
+            raise ValueError("Unsupported or missing state value")
 
-        current = await self.query(appliance_id)
+        async with self._lock:
+            current = await self._query_locked(appliance_id)
+            command = SetStateCommand()
+            command.beep_on = beep
+            for field in _CARRIED_STATE:
+                setattr(command, field, getattr(current, field))
+            for field, value in changes.items():
+                setattr(command, field, value)
+            response = await self._send(appliance_id, command)
+            if verify:
+                confirmed = await self._confirm_locked(appliance_id, changes)
+                if not all(getattr(confirmed, field, None) == value for field, value in changes.items()):
+                    raise CloudError("Device did not confirm requested state")
+                return confirmed
+            if not isinstance(response, StateResponse):
+                return await self._query_locked(appliance_id)
+            return response
 
-        command = SetStateCommand()
-        command.beep_on = beep
-        for field in _CARRIED_STATE:
-            setattr(command, field, getattr(current, field))
-        for field, value in changes.items():
-            setattr(command, field, value)
-
-        reply = await transparent_send(
-            self._cloud, appliance_id, command.tobytes(), self._app_key)
-        if reply is None:
-            raise CloudError(f"appliance {appliance_id} did not acknowledge command")
-        return Response.construct(reply)
