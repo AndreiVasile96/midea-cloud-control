@@ -12,7 +12,9 @@
       },
       "appliance": {
         "title": "Select appliance",
-        "data": { "appliance_id": "Appliance" }
+        "data": {
+          "appliance_id": "Appliance"
+        }
       }
     },
     "error": {
@@ -22,6 +24,16 @@
     },
     "abort": {
       "already_configured": "This appliance is already configured."
+    }
+  },
+  "entity": {
+    "switch": {
+      "turbo": {
+        "name": "Turbo"
+      },
+      "sleep": {
+        "name": "Sleep"
+      }
     }
   }
 }
