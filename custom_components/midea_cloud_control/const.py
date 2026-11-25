@@ -10,7 +10,7 @@ from homeassistant.components.climate import (
 )
 
 DOMAIN = "midea_cloud_control"
-PLATFORMS = ["climate"]
+PLATFORMS = ["climate", "switch"]
 
 CONF_CLOUD = "cloud"
 CONF_APPLIANCE_ID = "appliance_id"

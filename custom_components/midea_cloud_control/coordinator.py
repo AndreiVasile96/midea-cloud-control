@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+
+from homeassistant.exceptions import HomeAssistantError
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -40,3 +43,19 @@ class MideaCloudCoordinator(DataUpdateCoordinator[StateResponse]):
         except CloudError as err:
             raise UpdateFailed(f"Cloud command failed: {err}") from err
         await self.async_request_refresh()
+
+    async def async_set_switch(self, field: str, enabled: bool) -> None:
+        """Write once, then confirm against fresh state rather than optimistic UI."""
+        if field not in ("turbo", "sleep"):
+            raise ValueError("Unsupported switch")
+        try:
+            await self.client.set_state(self.appliance_id, **{field: enabled})
+            for delay in (1, 2, 3):
+                await asyncio.sleep(delay)
+                result = await self.client.query(self.appliance_id)
+                self.async_set_updated_data(result)
+                if getattr(result, field, None) == enabled:
+                    return
+        except CloudError as err:
+            raise HomeAssistantError("Cloud switch command failed") from err
+        raise HomeAssistantError("Device did not confirm the requested switch state")
